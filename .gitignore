@@ -1,6 +1,14 @@
-sample/
+sample/*
 
-cnn/data/
+cnn/data/*
 
-cnn/model/
+cnn/model/*
+
+data/*
+
+stanford_corenlp_pywrapper/*
+
+simple_cnn/results/*
+
+simple_cnn/data/*
 
