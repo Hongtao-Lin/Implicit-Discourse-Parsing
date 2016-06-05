@@ -1,16 +1,20 @@
 require 'torch'
 require 'nn'
 require 'nngraph'
-require 'cudnn'
-require 'cunn'
 
-nngraph.setDebug(true)
+
+
+-- nngraph.setDebug(true)
 
 
 local ModelBuilder = torch.class('ModelBuilder')
 
 function ModelBuilder:make_net(w2v)
 
+	if opt.cudnn == 1 then
+		require 'cudnn'
+		require 'cunn'
+	end
 	local arg1 = nn.Identity()()
 	local arg2 = nn.Identity()()
 

@@ -4,6 +4,9 @@ cnn/data/*
 
 cnn/model/*
 
+cnn/*.hdf5
+cnn/*.bin
+
 data/*
 
 stanford_corenlp_pywrapper/*
@@ -12,3 +15,4 @@ simple_cnn/results/*
 
 simple_cnn/data/*
 
+*.out

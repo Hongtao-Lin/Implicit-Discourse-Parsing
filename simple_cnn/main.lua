@@ -1,10 +1,10 @@
 require 'hdf5'
 require 'nn'
+require 'torch'
 require 'optim'
 require 'lfs'
 require "nngraph"
-require "cudnn"
-require "cunn"
+
 
 cmd = torch.CmdLine()
 
@@ -18,11 +18,11 @@ cmd:option('-dev', '', 'Dev data')
 cmd:option('-test', '', 'Dev data')
 cmd:option('-model', '', 'Warm start model if test')
 cmd:option('-savefile', 'results/model.t7', 'path for save')
-cmd:option('-w2v', 'data/w2v.hdf5', 'Word2vec data')
+cmd:option('-w2v', 'data/random.hdf5', 'Word2vec data')
 cmd:option('-mode', '', 'Whether update w2v parameters.')
 cmd:option('-w2i', 'data/vocab.save', 'Word2idx data')
 cmd:option('-dropout_p', 0.5, 'p for dropout')
-cmd:option('-L2s', 3, 'Normalization for the final layer')
+cmd:option('-L2s', 5, 'Normalization for the final layer')
 cmd:option('-mtype', 'SCNN', 'model type')
 cmd:option('-config', '{}', 'Config per model')
 cmd:option('-num_classes', 11, 'Number of classes')
@@ -50,10 +50,18 @@ end
 
 function build_model(w2v)
 	local ModelBuilder
-	if opt.mtype == 'SCNN' then
-		ModelBuilder = require 'model.shallow_conv'
-	else
+
+	if opt.cudnn == 1 then
+		require "cudnn"
+		require "cunn"
+	end
+
+	if opt.mtype == 'RNN' then
+		ModelBuilder = require 'model.rnn'
+	elseif opt.mtype == 'CNN' then
 		ModelBuilder = require 'model.convNN'
+	else
+		ModelBuilder = require 'model.shallow_conv'
 	end
 	local model_builder = ModelBuilder.new()
 
@@ -65,17 +73,25 @@ function build_model(w2v)
 		model = torch.load(opt.model).model
 	end
 
-	local criterion = nn.ClassNLLCriterion()
 
+
+	-- local w = torch.Tensor({0.08, 0.02, 0.01, 0.03, 0.05, 0.2, 0.02, 0.25, 0.25, 0.01, 0.15})
+	-- local w = torch.Tensor({0.20, 0.02, 0.01, 0.03, 0.05, 0.2, 0.02, 0.20, 0.20, 0.01, 0.20})
+
+	local criterion = nn.ClassNLLCriterion(w)
+	
 	local layers = {}
 	layers['linear'] = get_layer(model, 'nn.Linear')
 	layers['w2v'] = get_layer(model, 'nn.LookupTable')
-
+	if opt.mtype == "RNN" then
+		layers["W_hh"] = get_layer(model, "nn.Recurrent")
+	end
 	-- move to GPU
 	if opt.cudnn == 1 then
 		model = model:cuda()
 		criterion = criterion:cuda()
 	end
+
 
 
 	return model, criterion, layers
@@ -137,7 +153,7 @@ function load_data()
 end
 
 function train_model(train_data, train_label, model, criterion, layers)
-	local optim_method = optim.lbfgs
+	local optim_method = optim.adadelta
 	local params, grads = model:getParameters()
 	local state = {}
 
@@ -189,7 +205,15 @@ function train_model(train_data, train_label, model, criterion, layers)
 
 			-- forward pass
 			local outputs = model:forward({inputs[1],inputs[2]})
+			-- print(layers["W_hh"].output)
+			-- print(outputs)
+
+			-- print(model.modules[3].modules[4].output)
 			local err = criterion:forward(outputs, targets)
+
+			-- print(model.modules[3].modules[4]:parameters()[1]:size())
+			-- print(model.modules[3].modules[4]:parameters()[2]:size())
+
 			-- track errors and confusion
 			total_err = total_err + err * batch_size
 			for j = 1, batch_size do
@@ -197,18 +221,14 @@ function train_model(train_data, train_label, model, criterion, layers)
 			end
 			-- compute gradients
 			local df_do = criterion:backward(outputs, targets)
-			-- print(df_do:size())
 			model:backward({inputs[1], inputs[2]}, df_do)
-	
-			if opt.mode == "static" then
-				layers.w2v.gradWeight:zero()
-			end
 
 			return err, grads
 		end
 
 		-- gradient descent
-		optim_method(func, params, state)
+		-- optim_method(func, params, state)
+		optim_method(func, params, state, config)
 		-- reset padding embedding to zero
 		-- layers.w2v.weight[1]:zero()
 		-- Renorm (Euclidean projection to L2 ball)
@@ -238,8 +258,9 @@ function train_model(train_data, train_label, model, criterion, layers)
 
 end
 
-function test_model(test_data, test_label, model, criterion)
-	model:evaluate()
+function test_model(test_data, test_label, model, criterion, layers)
+	-- model:evaluate()
+	model:training()
 
 	local classes = {}
 	for i = 1, opt.num_classes do
@@ -275,7 +296,6 @@ function test_model(test_data, test_label, model, criterion)
 			targets = targets:double()
 		end
 		local outputs = model:forward({inputs[1], inputs[2]})
-
 		for i = 1, batch_size do
 			confusion:add(outputs[i], targets[i])
 			-- output error sentences.
@@ -311,6 +331,9 @@ function test_model(test_data, test_label, model, criterion)
 end
 
 function main()
+
+	torch.setnumthreads(1)
+
 	-- parse arguments
 	opt = cmd:parse(arg)
 
@@ -328,6 +351,7 @@ function main()
 	if opt.train_only == 1 then
 		
 		opt.max_sent = train[1]:size(2)
+		opt.num_classes = train_label:size(2)
 		local best_model, best_epoch
 		local best_perf = 0.0 -- save best model
 
@@ -340,10 +364,11 @@ function main()
 
 		for epoch = 1, opt.epochs do
 			local epoch_time = timer:time().real
+			local train_perf = 1.0
 			local train_perf = train_model(train, train_label, model, criterion, layers)
 			-- No early stopping
 
-			local dev_perf = test_model(dev, dev_label, model, criterion)
+			local dev_perf = test_model(dev, dev_label, model, criterion, layers)
 			print('epoch:', epoch, 'train perf:', 100*train_perf, '%, val perf: ', 100*dev_perf, '%')
 			res_file:write(epoch .. '\t' .. string.format("%.2f",100*train_perf) .. '\t' ..  string.format("%.2f",100*dev_perf) .. '\n')
 			if dev_perf >= best_perf then
@@ -384,8 +409,9 @@ function main()
 		torch.save(savefile, save)
 	else
 		opt.max_sent = test[1]:size(1)
+		opt.num_classes = test_label:size(2)
 		local model, criterion, layers = build_model(w2v)
-		local test_err = test_model(test, test_label, model, criterion)
+		local test_err = test_model(test, test_label, model, criterion, layers)
 		print('test perf: ', 100*test_err, '%')
 	end
 

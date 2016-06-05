@@ -9,18 +9,19 @@ import h5py
 import numpy as np
 
 label2idx = {"Instantiation":0,"Synchrony":1,"Pragmatic cause":2,"List":3,"Asynchronous":4,"Restatement":5,"Concession":6,"Conjunction":7,"Cause":8,"Alternative":9,"Contrast":10}
+# label2idx = {"Instantiation":0,"Synchrony":4,"Pragmatic cause":4,"List":4,"Asynchronous":4,"Restatement":1,"Concession":4,"Conjunction":2,"Cause":3,"Alternative":4,"Contrast":4}
 
 def clean_str(string):
 	"""
 	Tokenization/string cleaning for all datasets except for SST.
 	"""
 	string = re.sub(r"[^A-Za-z0-9(),!?\'\`|]", " ", string)     
-	string = re.sub(r"\'s", " is", string) 
-	string = re.sub(r"\'ve", " have", string) 
-	string = re.sub(r"n\'t", " not", string) 
-	string = re.sub(r"\'re", " are", string) 
+	string = re.sub(r"\'s", " \'s", string) 
+	string = re.sub(r"\'ve", " \'ve", string) 
+	string = re.sub(r"n\'t", " n\'t", string) 
+	string = re.sub(r"\'re", " \'re", string) 
 	string = re.sub(r"\'d", " \'d", string) 
-	string = re.sub(r"\'ll", " will", string) 
+	string = re.sub(r"\'ll", " \'ll", string) 
 	string = re.sub(r",", " , ", string) 
 	string = re.sub(r"!", " ! ", string) 
 	string = re.sub(r"\(", " ( ", string) 
@@ -55,42 +56,43 @@ def get_discourse(jsn, r, maxlen, train=False):
 	words2 = get_words(jsn["Arg2"])
 	idx1 = []
 	idx2 = []
+	start = 1
 
 	for word in words1:
-		idx1.append(r.word2idx(word))
+		idx1.append(r.word2idx(word)+start)
 	if len(idx1) > maxlen:
 		print len(idx1)
 		idx1 = idx1[:maxlen]
 	pad_num = maxlen - len(idx1)
-	idx1 = [0] * ((pad_num+1)/2) + idx1 + [0] * (pad_num/2)
+	idx1 = [0+start] * ((pad_num+1)/2) + idx1 + [0+start] * (pad_num/2)
 	for word in words2:
-		idx2.append(r.word2idx(word))
+		idx2.append(r.word2idx(word)+start)
 	if len(idx2) > maxlen:
 		print len(idx2)
 		idx2 = idx2[:maxlen]
 	pad_num = maxlen - len(idx2)
-	idx2 = [0] * ((pad_num+1)/2) + idx2 + [0] * (pad_num/2)
+	idx2 = [0+start] * ((pad_num+1)/2) + idx2 + [0+start] * (pad_num/2)
 
 	i = [idx1, idx2]
 
 	labels = []
+	num_classes = max(label2idx.values())+1
 	for label in jsn["Sense"]:
 		labels.append(label2idx[label.split(".")[-1]])
 	if train != True:
-		o = [0]*12
+		o = [0+start]*num_classes
 		for label_idx in labels:
-			o[label_idx] = 1
+			o[label_idx] += 1
 		io = [i, o]
 		return io
 	else:
 		io_list = []
 		for label_idx in labels:
-			o = [0] * 12
-			o[label_idx] = 1
+			o = [0+start] * num_classes
+			o[label_idx] += 1
 			io = [i, o]
 			io_list.append(io)
 		return io_list
-
 
 class Vocab(object):
 	"""Build the vocab of inputs"""
@@ -99,10 +101,11 @@ class Vocab(object):
 		if self.file == "":
 			self.file = conf["train_file"]
 		self.idx = ["NULL"]
-		self.word = {0: "NULL"}
+		self.word = {"NULL": 0} # {"a": 1}
 		self.vocab_size = 1
 		self.vec_size = conf["vec_size"]
 		self.gconf = conf
+		self.w2v = {}
 		self.ml = conf["maxlen"]
 
 	def word2idx(self, word):
@@ -148,9 +151,38 @@ class Vocab(object):
 		f.close()
 		print "Vocab saved"
 
+	def load_w2v(self):
+		fname = self.gconf["w2v_file"]
+		if fname == "":
+			return
+		f = open(fname, "r")
+		w2v = {}
+		for line in f.readlines():
+			word = line.split(" ")[0]
+			vec = [float(v) for v in line.split(" ")[1:]]
+			w2v[word] = vec
+		print 1
+		words = set.intersection(set(self.idx), set(w2v.keys()))
+		print 2
+		for word in self.idx:
+			self.w2v[word] = [0]*self.vec_size
+		for word in words:
+			self.w2v[word] = w2v[word]
+		print len(self.w2v), len(self.idx), len(w2v)
+			# if word not in self.idx:
+				# continue
+		print "loading w2v complete!"
+
 	def save_w2v(self):
-		f = hdf5.File("data/w2v.hdf5", "w")
-		w2v = np.random.rand(self.vocab_size, self.vec_size) - 0.5
+		f = h5py.File("data/w2v.hdf5", "w")
+		w2v = np.zeros([self.vocab_size, self.vec_size])
+		if self.w2v == {}:
+			w2v = np.random.rand(self.vocab_size, self.vec_size) - 0.5
+		else:
+			i = 0
+			for w in self.idx:
+				w2v[i] = self.w2v[w]
+				i += 1
 		f["w2v"] = w2v
 		f.close()
 
@@ -165,6 +197,7 @@ class Reader(object):
 		self.dev = {"arg1": [], "arg2": [], "label": []}
 		self.vocab = Vocab(conf)
 		self.vocab.read_vocab()
+		self.vocab.load_w2v()
 
 	def get_full_train_data(self):
 		f = open(self.train_file, "r")
@@ -200,11 +233,9 @@ class Reader(object):
 		return self.dev
 
 	def dump_train(self):
-		print 1
 		self.get_full_train_data()
-		print 2
 
-		f = h5py.File("data/pdtv_train.hdf5", "w")
+		f = h5py.File("data/pdtb_train.hdf5", "w")
 
 		f["arg1"] = np.array(self.train["arg1"])
 		f["arg2"] = np.array(self.train["arg2"])
@@ -215,7 +246,7 @@ class Reader(object):
 	def dump_valid(self):
 		self.get_full_valid_data()
 
-		f = h5py.File("data/pdtv_dev.hdf5", "w")
+		f = h5py.File("data/pdtb_dev.hdf5", "w")
 
 		f["arg1"] = np.array(self.dev["arg1"])
 		f["arg2"] = np.array(self.dev["arg2"])
@@ -232,11 +263,12 @@ if __name__ == '__main__':
 	conf = {
 		"train_file": "../data/train_pdtb.json",
 		"dev_file": "../data/dev_pdtb.json",
-		"w2v_file": "../data/glove.bin",
+		# "w2v_file": "../data/glove.bin",
+		"w2v_file": "",
 		# "vocab_file": "data/vocab",
 		"test_file": "",
 		# "vocab_size": 100000,
-		"vec_size": 100,
+		"vec_size": 50,
 		"maxlen": maxlen
 	}
 	# test vocab
@@ -251,5 +283,6 @@ if __name__ == '__main__':
 
 	# test reader
 	reader = Reader(conf)
+	reader.dump_w2v()
 	reader.dump_train()
 	reader.dump_valid()

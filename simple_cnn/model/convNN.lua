@@ -1,14 +1,17 @@
 require 'torch'
 require 'nn'
 require 'nngraph'
-require 'cudnn'
-require 'cunn'
 
 nngraph.setDebug(true)
 
 local ModelBuilder = torch.class('ModelBuilder')
 
 function ModelBuilder:make_net(w2v)
+
+	if opt.cudnn == 1 then
+		require 'cudnn'
+		require 'cunn'
+	end
 
 	local arg1 = nn.Identity()()
 	local arg2 = nn.Identity()()
@@ -29,7 +32,7 @@ function ModelBuilder:make_net(w2v)
 	local a = nn.Reshape(opt.max_sent, opt.vec_size, true)(lookup(arg1))
 	local b = nn.Reshape(opt.max_sent, opt.vec_size, true)(lookup(arg2))
 
-	local j = nn.JoinTable(3)({a, b})
+	local j = nn.JoinTable(2, 2)({a, b})
 
 	concat_in = nn.Reshape(1, opt.max_sent, opt.vec_size*2, true)(j)
 
