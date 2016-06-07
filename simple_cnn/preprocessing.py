@@ -39,11 +39,24 @@ def get_labels(label_seg):
 def get_words(jsn):
 	tmp = clean_str(jsn["RawText"]).split()
 	words = []
-	for word in tmp:
-		if u"\u00a0" in word:
-			word = "NULL"
-		words.append(word)
+	# for word in tmp:
+	# 	if u"\u00a0" in word:
+	# 		word = "NULL"
+	# 	words.append(word)
+	for i in range(len(jsn["Word"])):
+		words.append(jsn["Word"][i])
+		words.append("POS_" + jsn["POS"][i])
+	# words = jsn["Word"]
+	# for pos in jsn["POS"]:
+	# 	words.append("POS_"+pos)
 	return words
+
+# def get_words(jsn):
+# 	words = []
+# 	words = jsn["Word"]
+# 	# for p in jsn["POS"]:
+# 	# 	words.append("POS_"+p)
+# 	return words
 
 def get_discourse(jsn, r, maxlen, train=False):
 	"""
@@ -57,18 +70,17 @@ def get_discourse(jsn, r, maxlen, train=False):
 	idx1 = []
 	idx2 = []
 	start = 1
-
 	for word in words1:
 		idx1.append(r.word2idx(word)+start)
 	if len(idx1) > maxlen:
-		print len(idx1)
+		print "arg1 length: ", len(idx1)
 		idx1 = idx1[:maxlen]
 	pad_num = maxlen - len(idx1)
 	idx1 = [0+start] * ((pad_num+1)/2) + idx1 + [0+start] * (pad_num/2)
 	for word in words2:
 		idx2.append(r.word2idx(word)+start)
 	if len(idx2) > maxlen:
-		print len(idx2)
+		print "arg2 length: ", len(idx2)
 		idx2 = idx2[:maxlen]
 	pad_num = maxlen - len(idx2)
 	idx2 = [0+start] * ((pad_num+1)/2) + idx2 + [0+start] * (pad_num/2)
@@ -258,7 +270,7 @@ class Reader(object):
 		self.vocab.save_w2v()
 
 if __name__ == '__main__':
-	maxlen = 200
+	maxlen = 300
 
 	conf = {
 		"train_file": "../data/train_pdtb.json",
@@ -268,7 +280,7 @@ if __name__ == '__main__':
 		# "vocab_file": "data/vocab",
 		"test_file": "",
 		# "vocab_size": 100000,
-		"vec_size": 50,
+		"vec_size": 150,
 		"maxlen": maxlen
 	}
 	# test vocab

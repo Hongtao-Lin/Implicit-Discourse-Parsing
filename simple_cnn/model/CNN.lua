@@ -36,19 +36,26 @@ function ModelBuilder:make_net(w2v)
 
 	concat_in = nn.Reshape(1, opt.max_sent, opt.vec_size*2, true)(j)
 
+	local conv_w = opt.config.W or 3
+	local conv_h = opt.config.H or 3
+	local fold_num = opt.config.F or 1
+
 	if opt.cudnn == 1 then
-		conv = cudnn.SpatialConvolution(1, 1, 1, opt.config.W)
+		conv = cudnn.SpatialConvolution(1, 1, conv_w, conv_h)
 	else
-		conv = nn.SpatialConvolution(1, 1, 1, opt.config.W)
+		conv = nn.SpatialConvolution(1, 1, conv_w, conv_h)
 	end
 
-	conv.weight:uniform(-0.2, 0.2)
+	conv.weight = torch.randn(conv_w, conv_h)
 	conv.bias:zero()
 
-	conv = nn.Reshape(opt.max_sent-opt.config.W+1, opt.vec_size*2, true)(conv(concat_in))
+	local conved_w = opt.vec_size*2-conv_w+1
+	local conved_h = opt.max_sent-conv_h+1
+
+	conv = nn.Reshape(conved_h, conved_w, true)(conv(concat_in))
 
 
-	local max_layer = nn.TemporalMaxPooling(opt.max_sent-opt.config.W+2-2,1)(conv)
+	local max_layer = nn.TemporalMaxPooling(conved_h-fold_num+1, 1)(conv)
 
 	local fold_layer = nn.CAddTable()(nn.SplitTable(2)(max_layer))
 
@@ -59,10 +66,10 @@ function ModelBuilder:make_net(w2v)
 		non_linear = (nn.Tanh()(fold_layer))
 	end
 
-	local linear = nn.Linear(opt.vec_size*2, opt.num_classes)
+	local linear = nn.Linear(conved_w, opt.num_classes)
 
 	-- simple MLP layer
-	local r = math.sqrt(6/(opt.vec_size*2+opt.num_classes))
+	local r = math.sqrt(6/(conved_w+opt.num_classes))
 
 	linear.weight:uniform(-r, r)
 	linear.bias:zero()

@@ -18,11 +18,11 @@ cmd:option('-dev', '', 'Dev data')
 cmd:option('-test', '', 'Dev data')
 cmd:option('-model', '', 'Warm start model if test')
 cmd:option('-savefile', 'results/model.t7', 'path for save')
-cmd:option('-w2v', 'data/random.hdf5', 'Word2vec data')
+cmd:option('-w2v', 'data/w2v.hdf5', 'Word2vec data')
 cmd:option('-mode', '', 'Whether update w2v parameters.')
 cmd:option('-w2i', 'data/vocab.save', 'Word2idx data')
 cmd:option('-dropout_p', 0.5, 'p for dropout')
-cmd:option('-L2s', 5, 'Normalization for the final layer')
+cmd:option('-L2s', 2, 'Normalization for the final layer')
 cmd:option('-mtype', 'SCNN', 'model type')
 cmd:option('-config', '{}', 'Config per model')
 cmd:option('-num_classes', 11, 'Number of classes')
@@ -30,7 +30,7 @@ cmd:option('-vec_size', 50, 'Vec dimension')
 cmd:option('-vocab_size', 21244, 'Vocab dimension')
 cmd:option('-max_sent', 150, 'Max sentence length')
 cmd:option('-train_only', 1, 'Tranining or testing')
-cmd:option('-batch_size', 50, 'Number of bathces')
+cmd:option('-batch_size', 100, 'Number of bathces')
 cmd:option('-epochs', 100, 'num of epoch')
 cmd:option('-optim', 'adagrad', 'method for optimizarion')
 cmd:option('-cudnn', 0, 'use cuda or not')
@@ -56,13 +56,7 @@ function build_model(w2v)
 		require "cunn"
 	end
 
-	if opt.mtype == 'RNN' then
-		ModelBuilder = require 'model.rnn'
-	elseif opt.mtype == 'CNN' then
-		ModelBuilder = require 'model.convNN'
-	else
-		ModelBuilder = require 'model.shallow_conv'
-	end
+	ModelBuilder = require ('model.' .. opt.mtype)
 	local model_builder = ModelBuilder.new()
 
 	local model
@@ -72,8 +66,6 @@ function build_model(w2v)
 		print(opt.model)
 		model = torch.load(opt.model).model
 	end
-
-
 
 	-- local w = torch.Tensor({0.08, 0.02, 0.01, 0.03, 0.05, 0.2, 0.02, 0.25, 0.25, 0.01, 0.15})
 	-- local w = torch.Tensor({0.20, 0.02, 0.01, 0.03, 0.05, 0.2, 0.02, 0.20, 0.20, 0.01, 0.20})
@@ -91,8 +83,6 @@ function build_model(w2v)
 		model = model:cuda()
 		criterion = criterion:cuda()
 	end
-
-
 
 	return model, criterion, layers
 end
@@ -156,7 +146,7 @@ function train_model(train_data, train_label, model, criterion, layers)
 	local optim_method = optim.adadelta
 	local params, grads = model:getParameters()
 	local state = {}
-
+	-- print(model:getParameters():size())
 	model:training()
 
 	local train_size = train_data:size(2)
@@ -206,13 +196,7 @@ function train_model(train_data, train_label, model, criterion, layers)
 			-- forward pass
 			local outputs = model:forward({inputs[1],inputs[2]})
 			-- print(layers["W_hh"].output)
-			-- print(outputs)
-
-			-- print(model.modules[3].modules[4].output)
 			local err = criterion:forward(outputs, targets)
-
-			-- print(model.modules[3].modules[4]:parameters()[1]:size())
-			-- print(model.modules[3].modules[4]:parameters()[2]:size())
 
 			-- track errors and confusion
 			total_err = total_err + err * batch_size
@@ -223,12 +207,12 @@ function train_model(train_data, train_label, model, criterion, layers)
 			local df_do = criterion:backward(outputs, targets)
 			model:backward({inputs[1], inputs[2]}, df_do)
 
+			-- layers.w2v.gradWeight:zero()
 			return err, grads
 		end
 
 		-- gradient descent
-		-- optim_method(func, params, state)
-		optim_method(func, params, state, config)
+		optim_method(func, params, config, state)
 		-- reset padding embedding to zero
 		-- layers.w2v.weight[1]:zero()
 		-- Renorm (Euclidean projection to L2 ball)
@@ -236,7 +220,7 @@ function train_model(train_data, train_label, model, criterion, layers)
 			local n = row:norm()
 			row:mul(opt.L2s):div(1e-7 + n)
 		end
-		-- -- renormalize linear row weights
+		-- renormalize linear row weights
 		-- local w = layers.linear.weight
 		-- for j = 1, w:size(1) do
 		-- 	renorm(w[j])
@@ -259,8 +243,7 @@ function train_model(train_data, train_label, model, criterion, layers)
 end
 
 function test_model(test_data, test_label, model, criterion, layers)
-	-- model:evaluate()
-	model:training()
+	model:evaluate()
 
 	local classes = {}
 	for i = 1, opt.num_classes do
@@ -269,7 +252,7 @@ function test_model(test_data, test_label, model, criterion, layers)
 	local confusion = optim.ConfusionMatrix(classes)
 	confusion:zero()
 	local test_size = test_data:size(2)
-	local total_err = 0
+	local total_acc = 0
 	--  detailed info.
 	-- local error_detail = {}
 	-- local idx_to_word = {}
@@ -301,8 +284,8 @@ function test_model(test_data, test_label, model, criterion, layers)
 			-- output error sentences.
 			local _, predict = outputs[i]:max(1)
 			-- if predict[1] ~= targets[i] then
-			if targets[i][predict[1]] ~= 1 then
-				total_err = total_err + 1
+			if targets[i][predict[1]] == 2 then
+				total_acc = total_acc + 1
 				-- local sen = ""
 				-- for j = 1, inputs[i]:size(1) do
 				--   if inputs[i][j] ~= 1 then
@@ -327,8 +310,27 @@ function test_model(test_data, test_label, model, criterion, layers)
 
 	-- return error percent
 	confusion:updateValids()
-	return confusion.totalValid
+	-- print(confusion.totalValid)
+	-- print(total_acc/test_size)
+	return total_acc / test_size
 end
+
+function save_model(model) 
+	if not path.exists('results') then lfs.mkdir('results') end
+
+	local savefile
+	if opt.savefile ~= '' then
+		savefile = opt.savefile
+	else
+		savefile = string.format('results/%s_model.t7', os.date('%Y%m%d_%H%M'))
+	end
+	print('saving results to ', savefile)
+	local save = {}
+	save['opt'] = opt
+	save['model'] = model
+	torch.save(savefile, save)
+end
+
 
 function main()
 
@@ -347,6 +349,7 @@ function main()
 	opt.vec_size = w2v:size(2)
 	loadstring("opt.config = " .. opt.config)()
 	print(opt.config)
+	print(opt.vocab_size)
 
 	if opt.train_only == 1 then
 		
@@ -375,6 +378,10 @@ function main()
 				best_model = model:clone()
 				best_perf = dev_perf
 				best_epoch = epoch
+			end
+			if epoch % 10 == 0 then
+				save_model(best_model)
+			end
 
 			-- early stopping
 			-- if epoch % 5 == 0 then
@@ -391,22 +398,9 @@ function main()
 			-- 	print('epoch:', epoch, 'train perf:', 100*train_perf, '%')
 			-- end
 
-			end
 		end
+		save_model(best_model)
 
-		if not path.exists('results') then lfs.mkdir('results') end
-
-		local savefile
-		if opt.savefile ~= '' then
-			savefile = opt.savefile
-		else
-			savefile = string.format('results/%s_model.t7', os.date('%Y%m%d_%H%M'))
-		end
-		print('saving results to ', savefile)
-		local save = {}
-		save['opt'] = opt
-		save['model'] = best_model
-		torch.save(savefile, save)
 	else
 		opt.max_sent = test[1]:size(1)
 		opt.num_classes = test_label:size(2)
