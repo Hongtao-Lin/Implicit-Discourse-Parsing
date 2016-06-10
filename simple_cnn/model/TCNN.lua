@@ -4,8 +4,6 @@ require 'nngraph'
 
 local ModelBuilder = torch.class('ModelBuilder')
 
-nngraph.setDebug(true)
-
 function ModelBuilder:make_net(w2v)
 
 	if opt.cudnn == 1 then
@@ -16,11 +14,17 @@ function ModelBuilder:make_net(w2v)
 	local arg1 = nn.Identity()()
 	local arg2 = nn.Identity()()
 
+	local pos1, pos2, pos_input, pos_lookup
+
 
 	local input = nn.JoinTable(1, 1)({arg1, arg2})
 
 	local lookup
-	lookup = nn.LookupTable(opt.vocab_size, opt.vec_size)
+	if opt.POS_concat then
+		lookup = nn.LookupTable(opt.vocab_size, opt.vec_size-opt.POS_dim)
+	else
+		lookup = nn.LookupTable(opt.vocab_size, opt.vec_size)
+	end
 	lookup.weight:copy(w2v)
 	lookup.weight[1]:zero()
 
@@ -29,11 +33,25 @@ function ModelBuilder:make_net(w2v)
 	-- local input = nn.JoinTable(1, 2)({a, b})
 	-- local input = nn.JoinTable(1, 2)({lookup(arg1), lookup(arg2)})
 
-	lookup = lookup(input)
+	input = lookup(input)
+
+	if opt.POS_concat then
+		pos_lookup = nn.LookupTable(opt.POS_dim+1, opt.POS_dim)
+		local pos_weight = torch.zeros(opt.POS_dim+1, opt.POS_dim)
+		pos_weight[{{2,-1},{}}] = torch.eye(opt.POS_dim, opt.POS_dim)
+		pos_lookup.weight = pos_weight
+		pos1 = nn.Identity()()
+		pos2 = nn.Identity()()
+		local p1 = nn.Reshape(opt.max_sent, opt.POS_dim, true)(pos_lookup(pos1))
+		pos_lookup.name = 'pos_w2v'
+		pos_input = nn.JoinTable(1, 2)({p1, pos_lookup(pos2)})
+		-- pos_input = nn.Reshape(opt.max_sent, opt.POS_dim, true)(pos_input)
+		input = nn.JoinTable(2, 2)({input, pos_input})
+	end
 
 	local conv
-	local kernels = opt.config.K or {3}
-	local conv_frame = opt.config.F or 300
+	local kernels = opt.config.K or {6}
+	local conv_frame = opt.config.F or 500
 	local conv_layers = {}
 
 	local conv_per_frame = math.floor(conv_frame / #kernels)
@@ -48,7 +66,7 @@ function ModelBuilder:make_net(w2v)
 		conv.weight:normal(-0.01, 0.01)
 		conv.bias:zero()
 		
-		conv_layer = conv(lookup)
+		conv_layer = conv(input)
 		if opt.cudnn == 1 then
 			max_time = nn.Max(2)(cudnn.Tanh()(conv_layer)) -- max over time
 		else
@@ -81,8 +99,12 @@ function ModelBuilder:make_net(w2v)
 		softmax = nn.LogSoftMax()
 	end
 
-	local output = softmax(linear(nn.Dropout(opt.dropout_p)(last_layer))) 
-	model = nn.gModule({arg1, arg2}, {output})
+	local output = softmax(linear(nn.Dropout(opt.dropout_p)(last_layer)))
+	if opt.POS_concat then
+		model = nn.gModule({arg1, arg2, pos1, pos2}, {output})
+	else
+		model = nn.gModule({arg1, arg2}, {output})
+	end
 	return model
 end
 

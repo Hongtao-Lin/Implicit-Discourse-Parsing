@@ -11,6 +11,16 @@ import numpy as np
 label2idx = {"Instantiation":0,"Synchrony":1,"Pragmatic cause":2,"List":3,"Asynchronous":4,"Restatement":5,"Concession":6,"Conjunction":7,"Cause":8,"Alternative":9,"Contrast":10}
 # label2idx = {"Instantiation":0,"Synchrony":4,"Pragmatic cause":4,"List":4,"Asynchronous":4,"Restatement":1,"Concession":4,"Conjunction":2,"Cause":3,"Alternative":4,"Contrast":4}
 
+POS_list = ["CC", "CD", "DT", "EX", "FW", "IN", "JJ", "JJR", "JJS", "LS", "MD", "NN", "NNS", \
+		    "NNP", "NNPS", "PDT", "POS", "PRP", "PRP$", "RB", "RBR", "RBS", "RP", "TO", "UH" \
+		    "VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "WDT", "WDN", "WP", "WP$", "WRB"]
+POS2idx = {}
+
+i = 1
+for p in POS_list:
+	POS2idx[p] = i
+	i += 1
+
 def clean_str(string):
 	"""
 	Tokenization/string cleaning for all datasets except for SST.
@@ -37,12 +47,7 @@ def get_labels(label_seg):
 	return labels
 
 def get_words(jsn):
-	tmp = clean_str(jsn["RawText"]).split()
 	words = []
-	# for word in tmp:
-	# 	if u"\u00a0" in word:
-	# 		word = "NULL"
-	# 	words.append(word)
 	for i in range(len(jsn["Word"])):
 		words.append(jsn["Word"][i])
 		words.append("POS_" + jsn["POS"][i])
@@ -51,14 +56,16 @@ def get_words(jsn):
 	# 	words.append("POS_"+pos)
 	return words
 
-# def get_words(jsn):
-# 	words = []
-# 	words = jsn["Word"]
-# 	# for p in jsn["POS"]:
-# 	# 	words.append("POS_"+p)
-# 	return words
+def get_POS(jsn, start):
+	pos = []
+	for p in jsn["POS"]:
+		if p not in POS_list:
+			pos.append(0+start)
+		else:
+			pos.append(POS2idx[p]+start)
+	return pos
 
-def get_discourse(jsn, r, maxlen, train=False):
+def get_discourse(jsn, r, maxlen, train=False, POS_concat=False):
 	"""
 	return a list containint a pair where the first
 	element is a pair of two subsentences and the 
@@ -70,6 +77,10 @@ def get_discourse(jsn, r, maxlen, train=False):
 	idx1 = []
 	idx2 = []
 	start = 1
+	if POS_concat:
+		pos1 = get_POS(jsn["Arg1"], start)
+		pos2 = get_POS(jsn["Arg2"], start)
+
 	for word in words1:
 		idx1.append(r.word2idx(word)+start)
 	if len(idx1) > maxlen:
@@ -85,6 +96,17 @@ def get_discourse(jsn, r, maxlen, train=False):
 	pad_num = maxlen - len(idx2)
 	idx2 = [0+start] * ((pad_num+1)/2) + idx2 + [0+start] * (pad_num/2)
 
+	if POS_concat:
+		if len(pos1) > maxlen:
+			pos1 = pos1[:maxlen]
+		pad_num = maxlen - len(pos1)
+		pos1 = [0+start] * ((pad_num+1)/2) + pos1 + [0+start] * (pad_num/2)
+		if len(pos2) > maxlen:
+			pos2 = pos2[:maxlen]
+		pad_num = maxlen - len(pos2)
+		pos2 = [0+start] * ((pad_num+1)/2) + pos2 + [0+start] * (pad_num/2)
+
+
 	i = [idx1, idx2]
 
 	labels = []
@@ -96,6 +118,8 @@ def get_discourse(jsn, r, maxlen, train=False):
 		for label_idx in labels:
 			o[label_idx] += 1
 		io = [i, o]
+		if POS_concat:
+			io.append([pos1, pos2])
 		return io
 	else:
 		io_list = []
@@ -103,6 +127,8 @@ def get_discourse(jsn, r, maxlen, train=False):
 			o = [0+start] * num_classes
 			o[label_idx] += 1
 			io = [i, o]
+			if POS_concat:
+				io.append([pos1, pos2])
 			io_list.append(io)
 		return io_list
 
@@ -205,9 +231,10 @@ class Reader(object):
 		# self.test_file = conf["test_file"]
 		self.valid_file = conf["dev_file"]
 		self.ml = conf['maxlen']
-		self.train = {"arg1": [], "arg2": [], "label": []}
-		self.dev = {"arg1": [], "arg2": [], "label": []}
+		self.train = {"arg1": [], "arg2": [], "label": [], "pos1": [], "pos2": []}
+		self.dev = {"arg1": [], "arg2": [], "label": [], "pos1": [], "pos2": []}
 		self.vocab = Vocab(conf)
+		self.gconf = conf
 		self.vocab.read_vocab()
 		self.vocab.load_w2v()
 
@@ -219,10 +246,13 @@ class Reader(object):
 			if jsn["Type"] != "Implicit":
 				line = f.readline()
 				continue
-			gd = get_discourse(jsn, self.vocab, self.ml, train=True)
+			gd = get_discourse(jsn, self.vocab, self.ml, train=True, POS_concat=self.gconf["POS_concat"])
 			for item in gd:
 				self.train["arg1"].append(item[0][0])
 				self.train["arg2"].append(item[0][1])
+				if self.gconf["POS_concat"]:
+					self.train["pos1"].append(item[2][0])
+					self.train["pos2"].append(item[2][1])
 				self.train["label"].append(item[1])
 			line = f.readline()
 		print "training data ready..."
@@ -236,10 +266,13 @@ class Reader(object):
 			if jsn["Type"] != "Implicit":
 				line = f.readline()
 				continue
-			item = get_discourse(jsn, self.vocab, self.ml)
+			item = get_discourse(jsn, self.vocab, self.ml, POS_concat=self.gconf["POS_concat"])
 			self.dev["arg1"].append(item[0][0])
 			self.dev["arg2"].append(item[0][1])
 			self.dev["label"].append(item[1])
+			if self.gconf["POS_concat"]:
+					self.dev["pos1"].append(item[2][0])
+					self.dev["pos2"].append(item[2][1])
 			line = f.readline()
 		print "validation data ready..."
 		return self.dev
@@ -252,6 +285,10 @@ class Reader(object):
 		f["arg1"] = np.array(self.train["arg1"])
 		f["arg2"] = np.array(self.train["arg2"])
 		f["label"] = np.array(self.train["label"])
+		if self.gconf["POS_concat"]:
+			f["pos1"] = np.array(self.train["pos1"])
+			print f["pos1"]
+			f["pos2"] = np.array(self.train["pos2"])
 
 		f.close()
 
@@ -263,6 +300,9 @@ class Reader(object):
 		f["arg1"] = np.array(self.dev["arg1"])
 		f["arg2"] = np.array(self.dev["arg2"])
 		f["label"] = np.array(self.dev["label"])
+		if self.gconf["POS_concat"]:
+			f["pos1"] = np.array(self.dev["pos1"])
+			f["pos2"] = np.array(self.dev["pos2"])
 
 		f.close()
 
@@ -281,6 +321,8 @@ if __name__ == '__main__':
 		"test_file": "",
 		# "vocab_size": 100000,
 		"vec_size": 150,
+		# "POS_concat": True,
+		"POS_concat": False,
 		"maxlen": maxlen
 	}
 	# test vocab

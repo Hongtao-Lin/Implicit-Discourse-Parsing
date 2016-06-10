@@ -16,10 +16,12 @@ cmd:text('Options')
 cmd:option('-train', '', 'Training data')
 cmd:option('-dev', '', 'Dev data')
 cmd:option('-test', '', 'Dev data')
-cmd:option('-model', '', 'Warm start model if test')
+cmd:option('-model', '', 'Warm start model or for testing')
 cmd:option('-savefile', 'results/model.t7', 'path for save')
 cmd:option('-w2v', 'data/w2v.hdf5', 'Word2vec data')
 cmd:option('-mode', '', 'Whether update w2v parameters.')
+cmd:option('-POS_concat', true, 'Whether to concat pos one-got vector into word vector.')
+cmd:option('-POS_dim', 36, 'Whether to concat pos one-got vector into word vector.')
 cmd:option('-w2i', 'data/vocab.save', 'Word2idx data')
 cmd:option('-dropout_p', 0.5, 'p for dropout')
 cmd:option('-L2s', 2, 'Normalization for the final layer')
@@ -63,7 +65,7 @@ function build_model(w2v)
 	if opt.model == '' then
 		model = model_builder:make_net(w2v)
 	else
-		print(opt.model)
+		print("Using warm_up_model: " .. opt.model)
 		model = torch.load(opt.model).model
 	end
 
@@ -77,6 +79,9 @@ function build_model(w2v)
 	layers['w2v'] = get_layer(model, 'nn.LookupTable')
 	if opt.mtype == "RNN" then
 		layers["W_hh"] = get_layer(model, "nn.Recurrent")
+	end
+	if opt.POS_concat then
+		layers["pos_w2v"] = get_layer(model, "pos_w2v")
 	end
 	-- move to GPU
 	if opt.cudnn == 1 then
@@ -105,13 +110,22 @@ function load_data()
 		n = n + 1
 	end
 
+	local f_dim = 2
+	if opt.POS_concat then
+		f_dim = 4
+	end
+
 	if opt.train ~= '' then
 		f = hdf5.open(opt.train, 'r')
 		arg1 = f:read("arg1"):all()
 		arg2 = f:read("arg2"):all()
-		train = torch.Tensor(2, arg1:size(1), arg1:size(2))
+		train = torch.Tensor(f_dim, arg1:size(1), arg1:size(2))
 		train[1] = arg1
 		train[2] = arg2
+		if opt.POS_concat then
+			train[3] = f:read("pos1"):all()
+			train[4] = f:read("pos2"):all()
+		end
 		train_label = f:read("label"):all()
 	end
 
@@ -119,9 +133,13 @@ function load_data()
 		f = hdf5.open(opt.dev, 'r')
 		arg1 = f:read("arg1"):all()
 		arg2 = f:read("arg2"):all()
-		dev = torch.Tensor(2, arg1:size(1), arg1:size(2))
+		dev = torch.Tensor(f_dim, arg1:size(1), arg1:size(2))
 		dev[1] = arg1
 		dev[2] = arg2
+		if opt.POS_concat then
+			dev[3] = f:read("pos1"):all()
+			dev[4] = f:read("pos2"):all()
+		end
 		dev_label = f:read("label"):all()
 	end
 
@@ -129,9 +147,13 @@ function load_data()
 		f = hdf5.open(opt.test, 'r')
 		arg1 = f:read("arg1"):all()
 		arg2 = f:read("arg2"):all()
-		test = torch.Tensor(2, arg1:size(1), arg1:size(2))
+		test = torch.Tensor(f_dim, arg1:size(1), arg1:size(2))
 		test[1] = arg1
 		test[2] = arg2
+		if opt.POS_concat then
+			test[3] = f:read("pos1"):all()
+			test[4] = f:read("pos2"):all()
+		end
 		test_label = f:read("label"):all()
 	end
 
@@ -142,12 +164,14 @@ function load_data()
   -- return dev, dev_label, train, train_label, test, test_label, w2v
 end
 
-function train_model(train_data, train_label, model, criterion, layers)
-	local optim_method = optim.adadelta
+function train_model(train_data, train_label, model, criterion, layers, optim_method)
+
 	local params, grads = model:getParameters()
-	local state = {}
-	-- print(model:getParameters():size())
 	model:training()
+	local state = {}
+	-- local state = {learningRate = 1e-2}
+	local config -- for optim
+	config = { rho = 0.95, eps = 1e-6 }
 
 	local train_size = train_data:size(2)
 	local timer = torch.Timer()
@@ -160,9 +184,6 @@ function train_model(train_data, train_label, model, criterion, layers)
 	end
 	local confusion = optim.ConfusionMatrix(classes)
 	confusion:zero()
-
-	local config -- for optim
-	config = { rho = 0.95, eps = 1e-6 } 
 
 	-- shuffle batches
 	local num_batches = math.floor(train_size / opt.batch_size)
@@ -188,14 +209,19 @@ function train_model(train_data, train_label, model, criterion, layers)
 		local func = function(x)
 			-- get new parameters
 			if x ~= params then
-			params:copy(x)
+				params:copy(x)
 			end
 			-- reset gradients
 			grads:zero()
 
 			-- forward pass
-			local outputs = model:forward({inputs[1],inputs[2]})
-			-- print(layers["W_hh"].output)
+
+			local outputs
+			if opt.POS_concat then
+				outputs = model:forward({inputs[1],inputs[2], inputs[3], inputs[4]})
+			else
+				outputs = model:forward({inputs[1],inputs[2]})
+			end
 			local err = criterion:forward(outputs, targets)
 
 			-- track errors and confusion
@@ -205,8 +231,12 @@ function train_model(train_data, train_label, model, criterion, layers)
 			end
 			-- compute gradients
 			local df_do = criterion:backward(outputs, targets)
-			model:backward({inputs[1], inputs[2]}, df_do)
-
+			if opt.POS_concat then
+				model:backward({inputs[1], inputs[2], inputs[3], inputs[4]}, df_do)
+				layers.pos_w2v.gradWeight:zero()
+			else
+				model:backward({inputs[1], inputs[2]}, df_do)
+			end
 			-- layers.w2v.gradWeight:zero()
 			return err, grads
 		end
@@ -239,11 +269,11 @@ function train_model(train_data, train_label, model, criterion, layers)
 	-- return error percent
 	confusion:updateValids()
 	return confusion.totalValid
-
 end
 
 function test_model(test_data, test_label, model, criterion, layers)
 	model:evaluate()
+	-- model:training()
 
 	local classes = {}
 	for i = 1, opt.num_classes do
@@ -278,7 +308,11 @@ function test_model(test_data, test_label, model, criterion, layers)
 			inputs = inputs:double()
 			targets = targets:double()
 		end
-		local outputs = model:forward({inputs[1], inputs[2]})
+		if opt.POS_concat then
+			outputs = model:forward({inputs[1],inputs[2], inputs[3], inputs[4]})
+		else
+			outputs = model:forward({inputs[1],inputs[2]})
+		end
 		for i = 1, batch_size do
 			confusion:add(outputs[i], targets[i])
 			-- output error sentences.
@@ -331,7 +365,6 @@ function save_model(model)
 	torch.save(savefile, save)
 end
 
-
 function main()
 
 	torch.setnumthreads(1)
@@ -347,12 +380,16 @@ function main()
 	train, train_label, dev, dev_label, test, test_label, w2v = load_data(w2v)
 	opt.vocab_size = w2v:size(1)
 	opt.vec_size = w2v:size(2)
+	if opt.POS_concat then
+		opt.vec_size = opt.vec_size + opt.POS_dim
+	end
 	loadstring("opt.config = " .. opt.config)()
 	print(opt.config)
 	print(opt.vocab_size)
 
 	if opt.train_only == 1 then
-		
+		local optim_method = optim.adagrad
+
 		opt.max_sent = train[1]:size(2)
 		opt.num_classes = train_label:size(2)
 		local best_model, best_epoch
@@ -360,15 +397,14 @@ function main()
 
 		local timer = torch.Timer()
 		local start_time = timer:time().real
-
 		local model, criterion, layers = build_model(w2v)
+		local res_file = io.open("train_res.out", "a")
 
-		local res_file = io.open("train_res.out", "w")
 
 		for epoch = 1, opt.epochs do
 			local epoch_time = timer:time().real
 			local train_perf = 1.0
-			local train_perf = train_model(train, train_label, model, criterion, layers)
+			local train_perf = train_model(train, train_label, model, criterion, layers, optim_method)
 			-- No early stopping
 
 			local dev_perf = test_model(dev, dev_label, model, criterion, layers)
